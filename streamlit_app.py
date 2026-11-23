@@ -1,9 +1,11 @@
+import io
 import time
 import numpy as np
 import streamlit as st
+from PIL import Image
 
 # ==============================================================================
-# 1. PHANTOM & SINOGRAM GENERATOR (Kak & Slaney, Table 3.1 & Fig. 3.5)
+# 1. PHANTOM & SINOGRAM GENERATOR (Kak & Slaney, Table 3.1 & Eq. 7.25)
 # ==============================================================================
 SHEPP_LOGAN_TABLE_3_1 = [
     (0.0,   0.0,     0.92,   0.69,    90.0,  2.00),
@@ -45,6 +47,68 @@ def analytical_sinogram(angles_deg, num_rays=127, t_max=1.0, ellipses=SHEPP_LOGA
             proj_angle[inside] += (2.0 * rho * A * B / a_sq) * np.sqrt(a_sq - t_shift[inside]**2)
         sinogram[i, :] = proj_angle
     return sinogram, t_vals
+
+def forward_project_image(image, angles_deg, num_rays=127, t_max=1.0):
+    """Discrete Radon transform via bilinear ray integration (Kak & Slaney Eq. 7.25)."""
+    grid_size = image.shape[0]
+    coords = np.linspace(-1.0, 1.0, grid_size)
+    delta = coords[1] - coords[0]
+    ds = 0.5 * delta
+
+    t_vals = np.linspace(-t_max, t_max, num_rays)
+    num_samples = int(np.ceil(2.0 * np.sqrt(2.0) / ds)) + 1
+    s_vals = np.linspace(-np.sqrt(2.0), np.sqrt(2.0), num_samples)
+    T_grid, S_grid = np.meshgrid(t_vals, s_vals, indexing='ij')
+
+    sinogram = np.zeros((len(angles_deg), num_rays), dtype=np.float64)
+    for i, theta in enumerate(np.deg2rad(angles_deg)):
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        col_f = ((T_grid * cos_t - S_grid * sin_t) + 1.0) / delta
+        row_f = ((T_grid * sin_t + S_grid * cos_t) + 1.0) / delta
+
+        c0, r0 = np.floor(col_f).astype(np.int32), np.floor(row_f).astype(np.int32)
+        c1, r1 = c0 + 1, r0 + 1
+        valid = (c0 >= 0) & (c1 < grid_size) & (r0 >= 0) & (r1 < grid_size)
+
+        dc, dr = col_f - c0, row_f - r0
+        w00 = np.where(valid, (1.0 - dc) * (1.0 - dr), 0.0)
+        w10 = np.where(valid, dc * (1.0 - dr), 0.0)
+        w01 = np.where(valid, (1.0 - dc) * dr, 0.0)
+        w11 = np.where(valid, dc * dr, 0.0)
+
+        c0_s, c1_s = np.clip(c0, 0, grid_size - 1), np.clip(c1, 0, grid_size - 1)
+        r0_s, r1_s = np.clip(r0, 0, grid_size - 1), np.clip(r1, 0, grid_size - 1)
+
+        f_interp = (
+            w00 * image[r0_s, c0_s]
+            + w10 * image[r0_s, c1_s]
+            + w01 * image[r1_s, c0_s]
+            + w11 * image[r1_s, c1_s]
+        )
+        sinogram[i, :] = np.sum(f_interp, axis=1) * ds
+
+    return sinogram, t_vals
+
+def load_custom_image(file_bytes, file_name, grid_size):
+    buf = io.BytesIO(file_bytes)
+    if file_name.endswith(".npy"):
+        arr = np.load(buf).astype(np.float64)
+        if arr.ndim == 3:
+            arr = arr.mean(axis=-1)
+        img_pil = Image.fromarray(arr).resize((grid_size, grid_size), Image.Resampling.BILINEAR)
+        img = np.array(img_pil, dtype=np.float64)
+    else:
+        img_pil = Image.open(buf).convert("L").resize((grid_size, grid_size), Image.Resampling.BILINEAR)
+        img = np.array(img_pil, dtype=np.float64) / 255.0
+
+    img = np.flipud(img)
+    if img.max() > img.min():
+        img = (img - img.min()) / (img.max() - img.min())
+
+    coords = np.linspace(-1.0, 1.0, grid_size)
+    X, Y = np.meshgrid(coords, coords)
+    img[(X**2 + Y**2) > 1.0] = 0.0
+    return img
 
 # ==============================================================================
 # 2. RECONSTRUCTION ALGORITHMS (Ch. 3 FBP & Ch. 7 SART)
@@ -155,115 +219,237 @@ def reconstruct_sart(sinogram, angles_deg, t_vals, output_size=128, iterations=1
                 g = np.maximum(g, 0.0)
     return g
 
-def window_to_uint8(img, vmin, vmax, flip_vertical=True):
-    """Converts float matrix into a [0, 255] grayscale image for st.image."""
+def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None):
+    """Converts matrix to RGB uint8 and draws a dashed cyan scanline tying the image to the line profile."""
     if flip_vertical:
         img = np.flipud(img)
+        if scanline_row is not None:
+            scanline_row = (img.shape[0] - 1) - scanline_row
+
     clipped = np.clip((img - vmin) / max(1e-8, (vmax - vmin)), 0.0, 1.0)
-    return (clipped * 255).astype(np.uint8)
+    gray = (clipped * 255).astype(np.uint8)
+    rgb = np.stack([gray, gray, gray], axis=-1)
+
+    if scanline_row is not None and 0 <= scanline_row < rgb.shape[0]:
+        # Dashed cyan indicator line across the sampled row
+        for col in range(0, rgb.shape[1], 4):
+            rgb[scanline_row, col:col+2] = [0, 230, 255]
+    return rgb
+
+def render_metric_card(title, value, subtitle, bg_color, border_color, text_color):
+    """Renders a bold, color-coded KPI card."""
+    st.markdown(
+        f"""
+        <div style="
+            background-color: {bg_color};
+            border-left: 5px solid {border_color};
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+        ">
+            <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: {text_color}; opacity: 0.85;">
+                {title}
+            </div>
+            <div style="font-size: 1.55rem; font-weight: 900; color: {text_color}; line-height: 1.2; margin: 2px 0;">
+                {value}
+            </div>
+            <div style="font-size: 0.75rem; color: {text_color}; opacity: 0.75;">
+                {subtitle}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ==============================================================================
-# 3. STREAMLIT USER INTERFACE (ZERO MATPLOTLIB REQUIRED)
+# 3. STREAMLIT USER INTERFACE
 # ==============================================================================
 st.set_page_config(page_title="CT Reconstruction Workstation", layout="wide")
-st.title("Computed Tomography (CT) Reconstruction Workstation")
 
+# Requirement 3: Centered Title Header
+st.markdown(
+    """
+    <div style="text-align: center; padding: 0.25rem 0 1rem 0;">
+        <h1 style="margin-bottom: 0.2rem; font-weight: 800;">Computed Tomography (CT) Reconstruction Workstation</h1>
+        <p style="color: #9ca3af; font-size: 0.95rem; margin: 0;">
+            Analytical Filtered Backprojection (Ch. 3) vs. Iterative SART (Ch. 7) &bull; Kak &amp; Slaney
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Requirement 1: Sidebar with Phantom Source Toggle & Custom Image Upload
 with st.sidebar:
-    st.header("1. Scanner Geometry")
+    st.header("1. Phantom / Input Source")
+    use_custom = st.toggle("Use Custom Uploaded Image", value=False)
+    uploaded_file = None
+    if use_custom:
+        uploaded_file = st.file_uploader("Upload Image (PNG, JPG, NPY)", type=["png", "jpg", "jpeg", "npy"])
+    else:
+        st.caption("Active: **Shepp-Logan Head Phantom (Table 3.1)**")
+
+    st.divider()
+    st.header("2. Scanner Geometry")
     grid_size = st.selectbox("Reconstruction Grid (N × N)", [64, 128, 256], index=1)
     num_angles = st.slider("Projection Angles (Views)", 15, 180, 100, step=5)
     num_rays = st.slider("Rays per Projection", 31, 255, 127, step=2)
 
     st.divider()
-    st.header("2. Artifact & Noise Injection")
+    st.header("3. Artifact & Noise Injection")
     noise_level = st.slider("Detector Noise (σ)", 0.0, 0.05, 0.0, step=0.005)
     ring_artifact = st.checkbox("Simulate Bad Detector (Ring Artifact)", value=False)
     bad_det = num_rays // 2 + 15 if num_rays > 40 else num_rays // 2
 
     st.divider()
-    st.header("3. Reconstruction Method")
-    algo = st.radio("Algorithm", ["Filtered Backprojection (FBP)", "SART (Iterative)", "Side-by-Side: FBP vs. SART"])
+    st.header("4. Reconstruction Method")
+    algo = st.radio("Algorithm", ["Filtered Backprojection (FBP)", "SART (Iterative)", "Side-by-Side: FBP vs. SART"], index=2)
 
-    if "FBP" in algo:
+    if "FBP" in algo or "Side-by-Side" in algo:
         zero_pad = st.checkbox("Zero-Pad Projections (Prevent Dishing)", value=True)
         fbp_window = st.selectbox("Filter Window", ["hamming", "cosine", "ram-lak"])
 
-    if "SART" in algo:
+    if "SART" in algo or "Side-by-Side" in algo:
         sart_iters = st.slider("SART Iterations", 1, 5, 1)
         sart_hamming = st.checkbox("Longitudinal Ray Hamming Window", value=True)
         sart_nonneg = st.checkbox("Enforce Non-Negativity (g ≥ 0)", value=True)
 
     st.divider()
-    st.header("4. Contrast Window")
-    preset = st.selectbox("Display Range", ["Soft Tissue [0.95 – 1.05]", "Full Range [0.0 – 2.0]"])
-    vmin, vmax = (0.95, 1.05) if "Soft" in preset else (0.0, 2.0)
+    st.header("5. Contrast Window")
+    if not use_custom or uploaded_file is None:
+        preset = st.selectbox("Display Range", ["Soft Tissue [0.95 – 1.05]", "Full Range [0.0 – 2.0]"])
+        vmin, vmax = (0.95, 1.05) if "Soft" in preset else (0.0, 2.0)
+    else:
+        vmin, vmax = st.slider("Custom Contrast Range", 0.0, 1.0, (0.0, 1.0), step=0.05)
 
 @st.cache_data
-def get_clean_data(n, n_ang, n_ray):
+def get_shepp_logan_data(n, n_ang, n_ray):
     ang = np.linspace(0, 180, n_ang, endpoint=False)
     gt = generate_phantom_image(n, SHEPP_LOGAN_TABLE_3_1)
     sino, t = analytical_sinogram(ang, num_rays=n_ray, t_max=1.0)
     return gt, sino, ang, t
 
-ground_truth, clean_sino, angles, t_vals = get_clean_data(grid_size, num_angles, num_rays)
-sinogram = clean_sino.copy()
+@st.cache_data
+def get_custom_data(file_bytes, file_name, n, n_ang, n_ray):
+    ang = np.linspace(0, 180, n_ang, endpoint=False)
+    gt = load_custom_image(file_bytes, file_name, n)
+    sino, t = forward_project_image(gt, ang, num_rays=n_ray, t_max=1.0)
+    return gt, sino, ang, t
 
+if use_custom and uploaded_file is not None:
+    ground_truth, clean_sino, angles, t_vals = get_custom_data(
+        uploaded_file.getvalue(), uploaded_file.name, grid_size, num_angles, num_rays
+    )
+    active_custom = True
+else:
+    if use_custom:
+        st.info("Upload a PNG, JPG, or NPY file in the left sidebar (displaying Shepp-Logan phantom meanwhile).")
+    ground_truth, clean_sino, angles, t_vals = get_shepp_logan_data(grid_size, num_angles, num_rays)
+    active_custom = False
+
+sinogram = clean_sino.copy()
 if noise_level > 0:
     sinogram += np.random.default_rng(42).normal(0.0, noise_level, size=sinogram.shape)
 if ring_artifact:
     sinogram[:, bad_det] *= 0.985
 
 results = {}
-if "FBP" in algo:
+if "FBP" in algo or "Side-by-Side" in algo:
     t0 = time.perf_counter()
     img = reconstruct_fbp(sinogram, angles, t_vals, output_size=grid_size, zero_pad=zero_pad, window=fbp_window)
     results["FBP"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
 
-if "SART" in algo:
+if "SART" in algo or "Side-by-Side" in algo:
     with st.spinner("Running SART iterations..."):
         t0 = time.perf_counter()
         img = reconstruct_sart(sinogram, angles, t_vals, output_size=grid_size, iterations=sart_iters, use_hamming=sart_hamming, non_negative=sart_nonneg)
         results["SART"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
 
-# Metrics Banner
-cols = st.columns(len(results) * 2 + 1)
-cols[0].metric("Views × Rays", f"{num_angles} × {num_rays}")
-idx = 1
-for name, d in results.items():
-    cols[idx].metric(f"{name} Time", f"{d['ms']:.1f} ms")
-    cols[idx + 1].metric(f"{name} RMSE", f"{d['rmse']:.4f}")
-    idx += 2
+# Requirement 2: Bold, Color-Coded KPI Metric Boxes
+metric_cols = st.columns(len(results) * 2 + 1)
+with metric_cols[0]:
+    render_metric_card(
+        "VIEWS × RAYS",
+        f"{num_angles} × {num_rays}",
+        f"Grid: {grid_size}×{grid_size} px",
+        bg_color="rgba(59, 130, 246, 0.14)",
+        border_color="#3b82f6",
+        text_color="#93c5fd",
+    )
 
-# Native Streamlit Image Views
+col_idx = 1
+palette = {
+    "FBP": ("rgba(16, 185, 129, 0.14)", "#10b981", "#6ee7b7"),
+    "SART": ("rgba(168, 85, 247, 0.14)", "#a855f7", "#d8b4fe"),
+}
+for name, d in results.items():
+    bg, border, txt = palette[name]
+    with metric_cols[col_idx]:
+        render_metric_card(
+            f"{name} COMPUTE TIME",
+            f"{d['ms']:.1f} ms",
+            "Execution latency",
+            bg_color=bg,
+            border_color=border,
+            text_color=txt,
+        )
+    with metric_cols[col_idx + 1]:
+        render_metric_card(
+            f"{name} RMSE ERROR",
+            f"{d['rmse']:.4f}",
+            "Lower = closer to truth",
+            bg_color="rgba(245, 158, 11, 0.14)",
+            border_color="#f59e0b",
+            text_color="#fcd34d",
+        )
+    col_idx += 2
+
+# Requirement 5: Determine scanline coordinate & row index so images and profile graph are directly linked
+coords = np.linspace(-1.0, 1.0, grid_size)
+if not active_custom:
+    profile_y = -0.605
+    profile_label = "y = -0.605 (Cyan Scanline Across 3 Small Tumors)"
+else:
+    profile_y = 0.0
+    profile_label = "y = 0.000 (Cyan Center Scanline)"
+scan_row = int(np.argmin(np.abs(coords - profile_y)))
+
+# Requirement 4: Neat Bordered Boxes for Each Tomographic Image View
 st.subheader("Tomographic Image Views")
 img_cols = st.columns(2 + len(results))
 
-img_cols[0].image(
-    window_to_uint8(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
-    caption="1. Input Sinogram P(t, θ)",
-    use_container_width=True,
-)
+with img_cols[0]:
+    with st.container(border=True):
+        st.markdown("**1. Input Sinogram $P(t, \\theta)$**")
+        st.image(
+            render_with_scanline(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
+            use_container_width=True,
+        )
+        st.caption(f"{num_angles} angles × {num_rays} rays")
 
-img_cols[1].image(
-    window_to_uint8(ground_truth, vmin, vmax, flip_vertical=True),
-    caption="2. Ground Truth Phantom",
-    use_container_width=True,
-)
+with img_cols[1]:
+    with st.container(border=True):
+        st.markdown("**2. Ground Truth Phantom**")
+        st.image(
+            render_with_scanline(ground_truth, vmin, vmax, flip_vertical=True, scanline_row=scan_row),
+            use_container_width=True,
+        )
+        st.caption("Cyan dashed line = profile slice")
 
 for i, (name, d) in enumerate(results.items()):
-    img_cols[i + 2].image(
-        window_to_uint8(d["img"], vmin, vmax, flip_vertical=True),
-        caption=f"{i+3}. {name} Reconstruction",
-        use_container_width=True,
-    )
+    with img_cols[i + 2]:
+        with st.container(border=True):
+            st.markdown(f"**{i+3}. {name} Reconstruction**")
+            st.image(
+                render_with_scanline(d["img"], vmin, vmax, flip_vertical=True, scanline_row=scan_row),
+                use_container_width=True,
+            )
+            st.caption(f"RMSE: {d['rmse']:.4f} | {d['ms']:.1f} ms")
 
-# Native Interactive Line Profile Chart
-st.subheader("Line Profile Comparison (y = -0.605 Across Small Tumors)")
-coords = np.linspace(-1.0, 1.0, grid_size)
-row = np.argmin(np.abs(coords - (-0.605)))
-
-chart_data = {"Ground Truth": ground_truth[row, :]}
-for name, d in results.items():
-    chart_data[f"{name} Reconstruction"] = d["img"][row, :]
-
-st.line_chart(chart_data)
+# Requirement 5: Line Profile Tied Directly to the Cyan Scanline in a Compact Box
+with st.container(border=True):
+    st.markdown(f"**Cross-Sectional Intensity Profile Along `{profile_label}`**")
+    chart_data = {"Ground Truth": ground_truth[scan_row, :]}
+    for name, d in results.items():
+        chart_data[f"{name} Reconstruction"] = d["img"][scan_row, :]
+    st.line_chart(chart_data, height=220)
