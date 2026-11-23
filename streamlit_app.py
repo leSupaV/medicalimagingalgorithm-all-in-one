@@ -5,7 +5,7 @@ import streamlit as st
 from PIL import Image
 
 # ==============================================================================
-# phantom, sinogram generator from textbook 3.1 and Eq. 7.25
+# 1. PHANTOM & SINOGRAM GENERATOR
 # ==============================================================================
 SHEPP_LOGAN_TABLE_3_1 = [
     (0.0,   0.0,     0.92,   0.69,    90.0,  2.00),
@@ -49,7 +49,6 @@ def analytical_sinogram(angles_deg, num_rays=127, t_max=1.0, ellipses=SHEPP_LOGA
     return sinogram, t_vals
 
 def forward_project_image(image, angles_deg, num_rays=127, t_max=1.0):
-    """radon transform via bilinear ray integration."""
     grid_size = image.shape[0]
     coords = np.linspace(-1.0, 1.0, grid_size)
     delta = coords[1] - coords[0]
@@ -111,7 +110,7 @@ def load_custom_image(file_bytes, file_name, grid_size):
     return img
 
 # ==============================================================================
-# recon. algorithms (from ch3, ch7)
+# 2. RECONSTRUCTION ALGORITHMS
 # ==============================================================================
 def reconstruct_fbp(sinogram, angles_deg, t_vals, output_size=128, zero_pad=True, window="hamming"):
     num_angles, num_rays = sinogram.shape
@@ -220,7 +219,6 @@ def reconstruct_sart(sinogram, angles_deg, t_vals, output_size=128, iterations=1
     return g
 
 def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None):
-    """matrix -> RGB conversion and a cyan scanline shows image and line profile"""
     if flip_vertical:
         img = np.flipud(img)
         if scanline_row is not None:
@@ -231,30 +229,24 @@ def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None)
     rgb = np.stack([gray, gray, gray], axis=-1)
 
     if scanline_row is not None and 0 <= scanline_row < rgb.shape[0]:
-        # Dashed cyan indicator line across the sampled row
         for col in range(0, rgb.shape[1], 4):
             rgb[scanline_row, col:col+2] = [0, 230, 255]
     return rgb
 
-def render_metric_card(title, value, subtitle, bg_color, border_color, text_color):
-    """KPI card rendering"""
+def render_metric_card(title, value, bg_color="#262730"):
     st.markdown(
         f"""
         <div style="
-            background-color: {bg_color};
-            border-left: 5px solid {border_color};
+            background: {bg_color};
             border-radius: 8px;
-            padding: 12px 16px;
+            padding: 14px 16px;
             margin-bottom: 8px;
         ">
-            <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: {text_color}; opacity: 0.85;">
+            <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #ffffff; opacity: 0.85;">
                 {title}
             </div>
-            <div style="font-size: 1.55rem; font-weight: 900; color: {text_color}; line-height: 1.2; margin: 2px 0;">
+            <div style="font-size: 1.55rem; font-weight: 900; color: #ffffff; line-height: 1.25; margin-top: 4px;">
                 {value}
-            </div>
-            <div style="font-size: 0.75rem; color: {text_color}; opacity: 0.75;">
-                {subtitle}
             </div>
         </div>
         """,
@@ -262,57 +254,50 @@ def render_metric_card(title, value, subtitle, bg_color, border_color, text_colo
     )
 
 # ==============================================================================
-# streamlit UI
+# 3. STREAMLIT USER INTERFACE
 # ==============================================================================
-st.set_page_config(page_title="CT Reconstruction Workstation", layout="wide")
+st.set_page_config(page_title="Computed Tomography Reconstruction Workstation", layout="wide")
 
-# Requirement 3: Centered Title Header
 st.markdown(
     """
     <div style="text-align: center; padding: 0.25rem 0 1rem 0;">
-        <h1 style="margin-bottom: 0.2rem; font-weight: 800;">Computed Tomography Reconstruction Workstation</h1>
-        <p style="color: #9ca3af; font-size: 0.95rem; margin: 0;">
-            Comparison of Analytical Filtered Backprojection vs. Iterative SART
-        </p>
+        <h1 style="margin-bottom: 0; font-weight: 800; color: #ffffff;">Computed Tomography Reconstruction Workstation</h1>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-##sidebar and phantom source
 with st.sidebar:
-    st.header("1. Phantom / Input Source")
+    st.header("1. Input Source")
     use_custom = st.toggle("Use Custom Uploaded Image", value=False)
     uploaded_file = None
     if use_custom:
-        uploaded_file = st.file_uploader("Upload Image (PNG, JPG, NPY)", type=["png", "jpg", "jpeg", "npy"])
-    else:
-        st.caption("Active: **Shepp-Logan Head Phantom (Table 3.1)**")
+        uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg", "npy"])
 
     st.divider()
     st.header("2. Scanner Geometry")
-    grid_size = st.selectbox("Reconstruction Grid (N × N)", [64, 128, 256], index=1)
-    num_angles = st.slider("Projection Angles (Views)", 15, 180, 100, step=5)
+    grid_size = st.selectbox("Reconstruction Grid", [64, 128, 256], index=1)
+    num_angles = st.slider("Projection Angles", 15, 180, 100, step=5)
     num_rays = st.slider("Rays per Projection", 31, 255, 127, step=2)
 
     st.divider()
     st.header("3. Artifact & Noise Injection")
-    noise_level = st.slider("Detector Noise (σ)", 0.0, 0.05, 0.0, step=0.005)
-    ring_artifact = st.checkbox("Simulate Bad Detector (Ring Artifact)", value=False)
+    noise_level = st.slider("Detector Noise", 0.0, 0.05, 0.0, step=0.005)
+    ring_artifact = st.checkbox("Ring Artifact", value=False)
     bad_det = num_rays // 2 + 15 if num_rays > 40 else num_rays // 2
 
     st.divider()
     st.header("4. Reconstruction Method")
-    algo = st.radio("Algorithm", ["Filtered Backprojection (FBP)", "SART (Iterative)", "Side-by-Side: FBP vs. SART"], index=2)
+    algo = st.radio("Algorithm", ["Filtered Backprojection", "Simultaneous Algebraic Reconstruction", "Side-by-Side"], index=2)
 
-    if "FBP" in algo or "Side-by-Side" in algo:
-        zero_pad = st.checkbox("Zero-Pad Projections (Prevent Dishing)", value=True)
+    if algo in ("Filtered Backprojection", "Side-by-Side"):
+        zero_pad = st.checkbox("Zero-Pad Projections", value=True)
         fbp_window = st.selectbox("Filter Window", ["hamming", "cosine", "ram-lak"])
 
-    if "SART" in algo or "Side-by-Side" in algo:
-        sart_iters = st.slider("SART Iterations", 1, 5, 1)
+    if algo in ("Simultaneous Algebraic Reconstruction", "Side-by-Side"):
+        sart_iters = st.slider("Iterations", 1, 5, 1)
         sart_hamming = st.checkbox("Longitudinal Ray Hamming Window", value=True)
-        sart_nonneg = st.checkbox("Enforce Non-Negativity (g ≥ 0)", value=True)
+        sart_nonneg = st.checkbox("Enforce Non-Negativity", value=True)
 
     st.divider()
     st.header("5. Contrast Window")
@@ -342,8 +327,6 @@ if use_custom and uploaded_file is not None:
     )
     active_custom = True
 else:
-    if use_custom:
-        st.info("Upload a PNG, JPG, or NPY file in the left sidebar (displaying Shepp-Logan phantom meanwhile).")
     ground_truth, clean_sino, angles, t_vals = get_shepp_logan_data(grid_size, num_angles, num_rays)
     active_custom = False
 
@@ -354,76 +337,81 @@ if ring_artifact:
     sinogram[:, bad_det] *= 0.985
 
 results = {}
-if "FBP" in algo or "Side-by-Side" in algo:
+if algo in ("Filtered Backprojection", "Side-by-Side"):
     t0 = time.perf_counter()
     img = reconstruct_fbp(sinogram, angles, t_vals, output_size=grid_size, zero_pad=zero_pad, window=fbp_window)
-    results["FBP"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
+    results["Filtered Backprojection"] = {
+        "img": img,
+        "ms": (time.perf_counter() - t0) * 1000,
+        "rmse": np.sqrt(np.mean((ground_truth - img)**2)),
+    }
 
-if "SART" in algo or "Side-by-Side" in algo:
-    with st.spinner("Running SART iterations..."):
+if algo in ("Simultaneous Algebraic Reconstruction", "Side-by-Side"):
+    with st.spinner("Running iterations..."):
         t0 = time.perf_counter()
-        img = reconstruct_sart(sinogram, angles, t_vals, output_size=grid_size, iterations=sart_iters, use_hamming=sart_hamming, non_negative=sart_nonneg)
-        results["SART"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
+        img = reconstruct_sart(
+            sinogram,
+            angles,
+            t_vals,
+            output_size=grid_size,
+            iterations=sart_iters,
+            use_hamming=sart_hamming,
+            non_negative=sart_nonneg,
+        )
+        results["Simultaneous Algebraic Reconstruction"] = {
+            "img": img,
+            "ms": (time.perf_counter() - t0) * 1000,
+            "rmse": np.sqrt(np.mean((ground_truth - img)**2)),
+        }
 
-#colorcoded boxes
-metric_cols = st.columns(len(results) * 2 + 1)
+# Gray-shaded KPI boxes from left -> right with white text and no left border accent
+total_cards = len(results) * 2 + 1
+gray_shades = [
+    "#262730",
+    "#2f313c",
+    "#383a47",
+    "#414453",
+    "#4a4e5f",
+]
+
+metric_cols = st.columns(total_cards)
 with metric_cols[0]:
     render_metric_card(
         "VIEWS × RAYS",
         f"{num_angles} × {num_rays}",
-        f"Grid Size: {grid_size}×{grid_size} px",
-        bg_color="rgba(59, 130, 246, 0.14)",
-        border_color="#3b82f6",
-        text_color="#93c5fd",
+        bg_color=gray_shades[0],
     )
 
 col_idx = 1
-palette = {
-    "FBP": ("rgba(16, 185, 129, 0.14)", "#10b981", "#6ee7b7"),
-    "SART": ("rgba(168, 85, 247, 0.14)", "#a855f7", "#d8b4fe"),
-}
 for name, d in results.items():
-    bg, border, txt = palette[name]
     with metric_cols[col_idx]:
         render_metric_card(
-            f"{name} COMPUTE TIME",
+            f"{name} TIME",
             f"{d['ms']:.1f} ms",
-            bg_color=bg,
-            border_color=border,
-            text_color=txt,
+            bg_color=gray_shades[min(col_idx, len(gray_shades) - 1)],
         )
     with metric_cols[col_idx + 1]:
         render_metric_card(
-            f"{name} RMSE ERROR",
+            f"{name} ROOT MEAN SQUARE ERROR",
             f"{d['rmse']:.4f}",
-            bg_color="rgba(245, 158, 11, 0.14)",
-            border_color="#f59e0b",
-            text_color="#fcd34d",
+            bg_color=gray_shades[min(col_idx + 1, len(gray_shades) - 1)],
         )
     col_idx += 2
 
-#scanline/profile graph integration
 coords = np.linspace(-1.0, 1.0, grid_size)
-if not active_custom:
-    profile_y = -0.605
-    profile_label = "y = -0.605 (Cyan Scanline Across 3 Small Tumors)"
-else:
-    profile_y = 0.0
-    profile_label = "y = 0.000 (Cyan Center Scanline)"
+profile_y = -0.605 if not active_custom else 0.0
 scan_row = int(np.argmin(np.abs(coords - profile_y)))
 
-#boxes for viewing
 st.subheader("Tomographic Image Views")
 img_cols = st.columns(2 + len(results))
 
 with img_cols[0]:
     with st.container(border=True):
-        st.markdown("**1. Input Sinogram $P(t, \\theta)$**")
+        st.markdown("**1. Input Sinogram**")
         st.image(
             render_with_scanline(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
             use_container_width=True,
         )
-        st.caption(f"{num_angles} angles × {num_rays} rays")
 
 with img_cols[1]:
     with st.container(border=True):
@@ -432,21 +420,19 @@ with img_cols[1]:
             render_with_scanline(ground_truth, vmin, vmax, flip_vertical=True, scanline_row=scan_row),
             use_container_width=True,
         )
-        st.caption("Cyan dashed line = profile slice")
 
 for i, (name, d) in enumerate(results.items()):
     with img_cols[i + 2]:
         with st.container(border=True):
-            st.markdown(f"**{i+3}. {name} Reconstruction**")
+            st.markdown(f"**{i+3}. {name}**")
             st.image(
                 render_with_scanline(d["img"], vmin, vmax, flip_vertical=True, scanline_row=scan_row),
                 use_container_width=True,
             )
-            st.caption(f"RMSE: {d['rmse']:.4f} | {d['ms']:.1f} ms")
 
 with st.container(border=True):
-    st.markdown(f"**Cross-Sectional Intensity Profile Along `{profile_label}`**")
+    st.markdown(f"**Line Profile Comparison (`y = {profile_y}`)**")
     chart_data = {"Ground Truth": ground_truth[scan_row, :]}
     for name, d in results.items():
-        chart_data[f"{name} Reconstruction"] = d["img"][scan_row, :]
+        chart_data[name] = d["img"][scan_row, :]
     st.line_chart(chart_data, height=220)
