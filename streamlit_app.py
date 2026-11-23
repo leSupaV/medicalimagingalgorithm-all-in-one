@@ -1,6 +1,5 @@
 import time
 import numpy as np
-import matplotlib.pyplot as plt
 import streamlit as st
 
 # ==============================================================================
@@ -156,8 +155,15 @@ def reconstruct_sart(sinogram, angles_deg, t_vals, output_size=128, iterations=1
                 g = np.maximum(g, 0.0)
     return g
 
+def window_to_uint8(img, vmin, vmax, flip_vertical=True):
+    """Converts float matrix into a [0, 255] grayscale image for st.image."""
+    if flip_vertical:
+        img = np.flipud(img)
+    clipped = np.clip((img - vmin) / max(1e-8, (vmax - vmin)), 0.0, 1.0)
+    return (clipped * 255).astype(np.uint8)
+
 # ==============================================================================
-# 3. STREAMLIT USER INTERFACE
+# 3. STREAMLIT USER INTERFACE (ZERO MATPLOTLIB REQUIRED)
 # ==============================================================================
 st.set_page_config(page_title="CT Reconstruction Workstation", layout="wide")
 st.title("Computed Tomography (CT) Reconstruction Workstation")
@@ -219,6 +225,7 @@ if "SART" in algo:
         img = reconstruct_sart(sinogram, angles, t_vals, output_size=grid_size, iterations=sart_iters, use_hamming=sart_hamming, non_negative=sart_nonneg)
         results["SART"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
 
+# Metrics Banner
 cols = st.columns(len(results) * 2 + 1)
 cols[0].metric("Views × Rays", f"{num_angles} × {num_rays}")
 idx = 1
@@ -227,38 +234,36 @@ for name, d in results.items():
     cols[idx + 1].metric(f"{name} RMSE", f"{d['rmse']:.4f}")
     idx += 2
 
+# Native Streamlit Image Views
 st.subheader("Tomographic Image Views")
 img_cols = st.columns(2 + len(results))
 
-for col, title, data, kw in [
-    (img_cols[0], "1. Sinogram", sinogram, {"aspect": "auto", "extent": [-1, 1, 180, 0]}),
-    (img_cols[1], "2. Ground Truth", ground_truth, {"origin": "lower", "extent": [-1, 1, -1, 1], "vmin": vmin, "vmax": vmax}),
-]:
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(data, cmap="gray", **kw)
-    if "Truth" in title:
-        ax.axhline(-0.605, color="cyan", linestyle="--", linewidth=1)
-    ax.set_title(title)
-    col.pyplot(fig)
-    plt.close(fig)
+img_cols[0].image(
+    window_to_uint8(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
+    caption="1. Input Sinogram P(t, θ)",
+    use_container_width=True,
+)
+
+img_cols[1].image(
+    window_to_uint8(ground_truth, vmin, vmax, flip_vertical=True),
+    caption="2. Ground Truth Phantom",
+    use_container_width=True,
+)
 
 for i, (name, d) in enumerate(results.items()):
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(d["img"], cmap="gray", origin="lower", extent=[-1, 1, -1, 1], vmin=vmin, vmax=vmax)
-    ax.axhline(-0.605, color="cyan", linestyle="--", linewidth=1)
-    ax.set_title(f"{i+3}. {name} Reconstruction")
-    img_cols[i + 2].pyplot(fig)
-    plt.close(fig)
+    img_cols[i + 2].image(
+        window_to_uint8(d["img"], vmin, vmax, flip_vertical=True),
+        caption=f"{i+3}. {name} Reconstruction",
+        use_container_width=True,
+    )
 
+# Native Interactive Line Profile Chart
 st.subheader("Line Profile Comparison (y = -0.605 Across Small Tumors)")
 coords = np.linspace(-1.0, 1.0, grid_size)
 row = np.argmin(np.abs(coords - (-0.605)))
-fig_p, ax_p = plt.subplots(figsize=(10, 3.2))
-ax_p.plot(coords, ground_truth[row, :], "k--", label="Ground Truth")
+
+chart_data = {"Ground Truth": ground_truth[row, :]}
 for name, d in results.items():
-    ax_p.plot(coords, d["img"][row, :], label=f"{name}")
-ax_p.set_ylim(0.85, 1.10)
-ax_p.legend()
-ax_p.grid(True, alpha=0.3)
-st.pyplot(fig_p)
-plt.close(fig_p)
+    chart_data[f"{name} Reconstruction"] = d["img"][row, :]
+
+st.line_chart(chart_data)
