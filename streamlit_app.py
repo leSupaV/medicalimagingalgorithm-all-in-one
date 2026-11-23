@@ -218,40 +218,63 @@ def reconstruct_sart(sinogram, angles_deg, t_vals, output_size=128, iterations=1
                 g = np.maximum(g, 0.0)
     return g
 
-def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None):
+def window_to_uint8(img, vmin, vmax, flip_vertical=True):
     if flip_vertical:
         img = np.flipud(img)
-        if scanline_row is not None:
-            scanline_row = (img.shape[0] - 1) - scanline_row
-
     clipped = np.clip((img - vmin) / max(1e-8, (vmax - vmin)), 0.0, 1.0)
-    gray = (clipped * 255).astype(np.uint8)
-    rgb = np.stack([gray, gray, gray], axis=-1)
-
-    if scanline_row is not None and 0 <= scanline_row < rgb.shape[0]:
-        for col in range(0, rgb.shape[1], 4):
-            rgb[scanline_row, col:col+2] = [0, 230, 255]
-    return rgb
+    return (clipped * 255).astype(np.uint8)
 
 def render_metric_card(title, value, bg_color="#262730"):
     st.markdown(
         f"""
         <div style="
-            background: {bg_color};
+            background-color: {bg_color};
             border-radius: 8px;
-            padding: 14px 16px;
-            margin-bottom: 8px;
+            height: 112px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: center;
+            text-align: center;
+            box-sizing: border-box;
         ">
-            <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #ffffff; opacity: 0.85;">
+            <div style="
+                width: 100%;
+                font-size: 0.74rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: #ffffff;
+                line-height: 1.25;
+                padding-bottom: 8px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 36px;
+            ">
                 {title}
             </div>
-            <div style="font-size: 1.55rem; font-weight: 900; color: #ffffff; line-height: 1.25; margin-top: 4px;">
+            <div style="
+                width: 100%;
+                font-size: 1.45rem;
+                font-weight: 900;
+                color: #ffffff;
+                line-height: 1.1;
+                padding-top: 4px;
+            ">
                 {value}
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+@st.dialog("Fullscreen Image View", width="large")
+def open_fullscreen_modal(title, img_uint8):
+    st.subheader(title)
+    st.image(img_uint8, use_container_width=True)
 
 # ==============================================================================
 # 3. STREAMLIT USER INTERFACE
@@ -260,7 +283,13 @@ st.set_page_config(page_title="Computed Tomography Reconstruction Workstation", 
 
 st.markdown(
     """
-    <div style="text-align: center; padding: 0.25rem 0 1rem 0;">
+    <style>
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+    </style>
+    <div style="text-align: center; padding: 0.25rem 0 1.25rem 0;">
         <h1 style="margin-bottom: 0; font-weight: 800; color: #ffffff;">Computed Tomography Reconstruction Workstation</h1>
     </div>
     """,
@@ -268,44 +297,120 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.header("1. Input Source")
-    use_custom = st.toggle("Use Custom Uploaded Image", value=False)
+    st.header("Input Source")
+    use_custom = st.toggle(
+        "Use Custom Uploaded Image",
+        value=False,
+        help="Switch between the built-in Shepp-Logan head phantom and a custom uploaded grayscale image.",
+    )
     uploaded_file = None
     if use_custom:
-        uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg", "npy"])
+        uploaded_file = st.file_uploader(
+            "Upload Image",
+            type=["png", "jpg", "jpeg", "npy"],
+            help="Upload a PNG, JPG, JPEG, or NumPy (.npy) file to simulate forward projections and reconstruct it.",
+        )
 
     st.divider()
-    st.header("2. Scanner Geometry")
-    grid_size = st.selectbox("Reconstruction Grid", [64, 128, 256], index=1)
-    num_angles = st.slider("Projection Angles", 15, 180, 100, step=5)
-    num_rays = st.slider("Rays per Projection", 31, 255, 127, step=2)
+    st.header("Scanner Geometry")
+    grid_size = st.selectbox(
+        "Reconstruction Grid",
+        [64, 128, 256],
+        index=1,
+        help="Pixel resolution (N × N) of the reconstructed cross-sectional image.",
+    )
+    num_angles = st.slider(
+        "Projection Angles",
+        15,
+        180,
+        100,
+        step=5,
+        help="Total number of evenly spaced X-ray projection views acquired across 180 degrees.",
+    )
+    num_rays = st.slider(
+        "Rays per Projection",
+        31,
+        255,
+        127,
+        step=2,
+        help="Number of parallel detector measurements sampled at each projection angle.",
+    )
 
     st.divider()
-    st.header("3. Artifact & Noise Injection")
-    noise_level = st.slider("Detector Noise", 0.0, 0.05, 0.0, step=0.005)
-    ring_artifact = st.checkbox("Ring Artifact", value=False)
+    st.header("Artifact & Noise Injection")
+    noise_level = st.slider(
+        "Detector Noise",
+        0.0,
+        0.05,
+        0.0,
+        step=0.005,
+        help="Standard deviation of additive Gaussian noise injected into the sinogram measurements.",
+    )
+    ring_artifact = st.checkbox(
+        "Ring Artifact",
+        value=False,
+        help="Simulates a miscalibrated detector element across all angles, producing concentric rings.",
+    )
     bad_det = num_rays // 2 + 15 if num_rays > 40 else num_rays // 2
 
     st.divider()
-    st.header("4. Reconstruction Method")
-    algo = st.radio("Algorithm", ["Filtered Backprojection", "Simultaneous Algebraic Reconstruction", "Side-by-Side"], index=2)
+    st.header("Reconstruction Method")
+    algo = st.radio(
+        "Algorithm",
+        ["Filtered Backprojection", "Simultaneous Algebraic Reconstruction", "Side-by-Side"],
+        index=2,
+        help="Choose analytical Filtered Backprojection, iterative Simultaneous Algebraic Reconstruction, or compare both.",
+    )
 
     if algo in ("Filtered Backprojection", "Side-by-Side"):
-        zero_pad = st.checkbox("Zero-Pad Projections", value=True)
-        fbp_window = st.selectbox("Filter Window", ["hamming", "cosine", "ram-lak"])
+        zero_pad = st.checkbox(
+            "Zero-Pad Projections",
+            value=True,
+            help="Pads projections with zeros before the Fast Fourier Transform to prevent circular convolution dishing artifacts.",
+        )
+        fbp_window = st.selectbox(
+            "Filter Window",
+            ["hamming", "cosine", "ram-lak"],
+            help="Frequency-domain window multiplied with the ramp filter to balance edge sharpness against high-frequency noise.",
+        )
 
     if algo in ("Simultaneous Algebraic Reconstruction", "Side-by-Side"):
-        sart_iters = st.slider("Iterations", 1, 5, 1)
-        sart_hamming = st.checkbox("Longitudinal Ray Hamming Window", value=True)
-        sart_nonneg = st.checkbox("Enforce Non-Negativity", value=True)
+        sart_iters = st.slider(
+            "Iterations",
+            1,
+            5,
+            1,
+            help="Number of complete passes through all projection angles.",
+        )
+        sart_hamming = st.checkbox(
+            "Longitudinal Ray Hamming Window",
+            value=True,
+            help="Weights samples near the middle of each ray more heavily than noisy boundary pixels.",
+        )
+        sart_nonneg = st.checkbox(
+            "Enforce Non-Negativity",
+            value=True,
+            help="Clips negative attenuation values to zero after each projection angle update.",
+        )
 
     st.divider()
-    st.header("5. Contrast Window")
+    st.header("Contrast Window")
     if not use_custom or uploaded_file is None:
-        preset = st.selectbox("Display Range", ["Soft Tissue [0.95 – 1.05]", "Full Range [0.0 – 2.0]"])
+        preset = st.selectbox(
+            "Display Range",
+            ["Soft Tissue [0.95 – 1.05]", "Full Range [0.0 – 2.0]"],
+            help="Narrow window reveals subtle low-contrast brain structures; full range shows the entire skull and interior.",
+        )
         vmin, vmax = (0.95, 1.05) if "Soft" in preset else (0.0, 2.0)
     else:
-        vmin, vmax = st.slider("Custom Contrast Range", 0.0, 1.0, (0.0, 1.0), step=0.05)
+        vmin, vmax = st.slider(
+            "Custom Contrast Range",
+            0.0,
+            1.0,
+            (0.0, 1.0),
+            step=0.05,
+            help="Adjust minimum and maximum intensity clipping thresholds for display.",
+        )
 
 @st.cache_data
 def get_shepp_logan_data(n, n_ang, n_ray):
@@ -325,10 +430,8 @@ if use_custom and uploaded_file is not None:
     ground_truth, clean_sino, angles, t_vals = get_custom_data(
         uploaded_file.getvalue(), uploaded_file.name, grid_size, num_angles, num_rays
     )
-    active_custom = True
 else:
     ground_truth, clean_sino, angles, t_vals = get_shepp_logan_data(grid_size, num_angles, num_rays)
-    active_custom = False
 
 sinogram = clean_sino.copy()
 if noise_level > 0:
@@ -344,6 +447,7 @@ if algo in ("Filtered Backprojection", "Side-by-Side"):
         "img": img,
         "ms": (time.perf_counter() - t0) * 1000,
         "rmse": np.sqrt(np.mean((ground_truth - img)**2)),
+        "info": "Analytical reconstruction computed by ramp-filtering projections in the frequency domain and backprojecting across the image plane.",
     }
 
 if algo in ("Simultaneous Algebraic Reconstruction", "Side-by-Side"):
@@ -362,9 +466,10 @@ if algo in ("Simultaneous Algebraic Reconstruction", "Side-by-Side"):
             "img": img,
             "ms": (time.perf_counter() - t0) * 1000,
             "rmse": np.sqrt(np.mean((ground_truth - img)**2)),
+            "info": "Iterative algebraic reconstruction updating bilinear pixel weights simultaneously for each projection angle.",
         }
 
-# Gray-shaded KPI boxes from left -> right with white text and no left border accent
+# Equal-height, centered gray metric cards from left -> right
 total_cards = len(results) * 2 + 1
 gray_shades = [
     "#262730",
@@ -386,53 +491,53 @@ col_idx = 1
 for name, d in results.items():
     with metric_cols[col_idx]:
         render_metric_card(
-            f"{name} TIME",
+            f"{name} Time",
             f"{d['ms']:.1f} ms",
             bg_color=gray_shades[min(col_idx, len(gray_shades) - 1)],
         )
     with metric_cols[col_idx + 1]:
         render_metric_card(
-            f"{name} ROOT MEAN SQUARE ERROR",
+            f"{name} Root Mean Square Error",
             f"{d['rmse']:.4f}",
             bg_color=gray_shades[min(col_idx + 1, len(gray_shades) - 1)],
         )
     col_idx += 2
 
-coords = np.linspace(-1.0, 1.0, grid_size)
-profile_y = -0.605 if not active_custom else 0.0
-scan_row = int(np.argmin(np.abs(coords - profile_y)))
-
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 st.subheader("Tomographic Image Views")
-img_cols = st.columns(2 + len(results))
 
-with img_cols[0]:
-    with st.container(border=True):
-        st.markdown("**1. Input Sinogram**")
-        st.image(
-            render_with_scanline(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
-            use_container_width=True,
-        )
+cards = [
+    {
+        "title": "Input Sinogram",
+        "img": window_to_uint8(sinogram, sinogram.min(), sinogram.max(), flip_vertical=False),
+        "info": "Raw 2D projection data plotted across detector offset (horizontal) and scan angle (vertical).",
+        "key": "sinogram_zoom",
+    },
+    {
+        "title": "Ground Truth Phantom",
+        "img": window_to_uint8(ground_truth, vmin, vmax, flip_vertical=True),
+        "info": "Reference cross-sectional attenuation distribution used to generate the simulated X-ray projections.",
+        "key": "gt_zoom",
+    },
+]
 
-with img_cols[1]:
-    with st.container(border=True):
-        st.markdown("**2. Ground Truth Phantom**")
-        st.image(
-            render_with_scanline(ground_truth, vmin, vmax, flip_vertical=True, scanline_row=scan_row),
-            use_container_width=True,
-        )
+for idx, (name, d) in enumerate(results.items()):
+    cards.append(
+        {
+            "title": name,
+            "img": window_to_uint8(d["img"], vmin, vmax, flip_vertical=True),
+            "info": d["info"],
+            "key": f"recon_zoom_{idx}",
+        }
+    )
 
-for i, (name, d) in enumerate(results.items()):
-    with img_cols[i + 2]:
+img_cols = st.columns(len(cards))
+for col, card in zip(img_cols, cards):
+    with col:
         with st.container(border=True):
-            st.markdown(f"**{i+3}. {name}**")
-            st.image(
-                render_with_scanline(d["img"], vmin, vmax, flip_vertical=True, scanline_row=scan_row),
-                use_container_width=True,
-            )
-
-with st.container(border=True):
-    st.markdown(f"**Line Profile Comparison (`y = {profile_y}`)**")
-    chart_data = {"Ground Truth": ground_truth[scan_row, :]}
-    for name, d in results.items():
-        chart_data[name] = d["img"][scan_row, :]
-    st.line_chart(chart_data, height=220)
+            header_col, info_col = st.columns([0.86, 0.14], vertical_alignment="center")
+            header_col.markdown(f"**{card['title']}**")
+            info_col.markdown("", help=card["info"])
+            st.image(card["img"], use_container_width=True)
+            if st.button("Expand Fullscreen", key=card["key"], use_container_width=True):
+                open_fullscreen_modal(card["title"], card["img"])
