@@ -5,7 +5,7 @@ import streamlit as st
 from PIL import Image
 
 # ==============================================================================
-# 1. PHANTOM & SINOGRAM GENERATOR (Kak & Slaney, Table 3.1 & Eq. 7.25)
+# phantom, sinogram generator from textbook 3.1 and Eq. 7.25
 # ==============================================================================
 SHEPP_LOGAN_TABLE_3_1 = [
     (0.0,   0.0,     0.92,   0.69,    90.0,  2.00),
@@ -49,7 +49,7 @@ def analytical_sinogram(angles_deg, num_rays=127, t_max=1.0, ellipses=SHEPP_LOGA
     return sinogram, t_vals
 
 def forward_project_image(image, angles_deg, num_rays=127, t_max=1.0):
-    """Discrete Radon transform via bilinear ray integration (Kak & Slaney Eq. 7.25)."""
+    """radon transform via bilinear ray integration."""
     grid_size = image.shape[0]
     coords = np.linspace(-1.0, 1.0, grid_size)
     delta = coords[1] - coords[0]
@@ -111,7 +111,7 @@ def load_custom_image(file_bytes, file_name, grid_size):
     return img
 
 # ==============================================================================
-# 2. RECONSTRUCTION ALGORITHMS (Ch. 3 FBP & Ch. 7 SART)
+# recon. algorithms (from ch3, ch7)
 # ==============================================================================
 def reconstruct_fbp(sinogram, angles_deg, t_vals, output_size=128, zero_pad=True, window="hamming"):
     num_angles, num_rays = sinogram.shape
@@ -220,7 +220,7 @@ def reconstruct_sart(sinogram, angles_deg, t_vals, output_size=128, iterations=1
     return g
 
 def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None):
-    """Converts matrix to RGB uint8 and draws a dashed cyan scanline tying the image to the line profile."""
+    """matrix -> RGB conversion and a cyan scanline shows image and line profile"""
     if flip_vertical:
         img = np.flipud(img)
         if scanline_row is not None:
@@ -237,7 +237,7 @@ def render_with_scanline(img, vmin, vmax, flip_vertical=True, scanline_row=None)
     return rgb
 
 def render_metric_card(title, value, subtitle, bg_color, border_color, text_color):
-    """Renders a bold, color-coded KPI card."""
+    """KPI card rendering"""
     st.markdown(
         f"""
         <div style="
@@ -262,7 +262,7 @@ def render_metric_card(title, value, subtitle, bg_color, border_color, text_colo
     )
 
 # ==============================================================================
-# 3. STREAMLIT USER INTERFACE
+# streamlit UI
 # ==============================================================================
 st.set_page_config(page_title="CT Reconstruction Workstation", layout="wide")
 
@@ -270,16 +270,16 @@ st.set_page_config(page_title="CT Reconstruction Workstation", layout="wide")
 st.markdown(
     """
     <div style="text-align: center; padding: 0.25rem 0 1rem 0;">
-        <h1 style="margin-bottom: 0.2rem; font-weight: 800;">Computed Tomography (CT) Reconstruction Workstation</h1>
+        <h1 style="margin-bottom: 0.2rem; font-weight: 800;">Computed Tomography Reconstruction Workstation</h1>
         <p style="color: #9ca3af; font-size: 0.95rem; margin: 0;">
-            Analytical Filtered Backprojection (Ch. 3) vs. Iterative SART (Ch. 7) &bull; Kak &amp; Slaney
+            Comparison of Analytical Filtered Backprojection vs. Iterative SART
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Requirement 1: Sidebar with Phantom Source Toggle & Custom Image Upload
+##sidebar and phantom source
 with st.sidebar:
     st.header("1. Phantom / Input Source")
     use_custom = st.toggle("Use Custom Uploaded Image", value=False)
@@ -365,7 +365,7 @@ if "SART" in algo or "Side-by-Side" in algo:
         img = reconstruct_sart(sinogram, angles, t_vals, output_size=grid_size, iterations=sart_iters, use_hamming=sart_hamming, non_negative=sart_nonneg)
         results["SART"] = {"img": img, "ms": (time.perf_counter() - t0) * 1000, "rmse": np.sqrt(np.mean((ground_truth - img)**2))}
 
-# Requirement 2: Bold, Color-Coded KPI Metric Boxes
+#colorcoded boxes
 metric_cols = st.columns(len(results) * 2 + 1)
 with metric_cols[0]:
     render_metric_card(
@@ -404,7 +404,7 @@ for name, d in results.items():
         )
     col_idx += 2
 
-# Requirement 5: Determine scanline coordinate & row index so images and profile graph are directly linked
+#scanline/profile graph integration
 coords = np.linspace(-1.0, 1.0, grid_size)
 if not active_custom:
     profile_y = -0.605
@@ -414,7 +414,7 @@ else:
     profile_label = "y = 0.000 (Cyan Center Scanline)"
 scan_row = int(np.argmin(np.abs(coords - profile_y)))
 
-# Requirement 4: Neat Bordered Boxes for Each Tomographic Image View
+#boxes for viewing
 st.subheader("Tomographic Image Views")
 img_cols = st.columns(2 + len(results))
 
@@ -446,7 +446,6 @@ for i, (name, d) in enumerate(results.items()):
             )
             st.caption(f"RMSE: {d['rmse']:.4f} | {d['ms']:.1f} ms")
 
-# Requirement 5: Line Profile Tied Directly to the Cyan Scanline in a Compact Box
 with st.container(border=True):
     st.markdown(f"**Cross-Sectional Intensity Profile Along `{profile_label}`**")
     chart_data = {"Ground Truth": ground_truth[scan_row, :]}
