@@ -371,7 +371,7 @@ with metric_cols[0]:
     render_metric_card(
         "VIEWS × RAYS",
         f"{num_angles} × {num_rays}",
-        f"Grid: {grid_size}×{grid_size} px",
+        f"Grid Size: {grid_size}×{grid_size} px",
         bg_color="rgba(59, 130, 246, 0.14)",
         border_color="#3b82f6",
         text_color="#93c5fd",
@@ -388,7 +388,6 @@ for name, d in results.items():
         render_metric_card(
             f"{name} COMPUTE TIME",
             f"{d['ms']:.1f} ms",
-            "Execution latency",
             bg_color=bg,
             border_color=border,
             text_color=txt,
@@ -397,7 +396,6 @@ for name, d in results.items():
         render_metric_card(
             f"{name} RMSE ERROR",
             f"{d['rmse']:.4f}",
-            "Lower = closer to truth",
             bg_color="rgba(245, 158, 11, 0.14)",
             border_color="#f59e0b",
             text_color="#fcd34d",
